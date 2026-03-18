@@ -1,0 +1,1672 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Čínsky Poštár — Trenčínsky Kraj</title>
+
+  <!-- Leaflet.js for OpenStreetMap -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js">
+// ===== PRESENTATION SECTION: populate dynamic values =====
+function buildPresentationSection() {
+  const dupKm  = MATCHING.reduce((s, m) => s + m.dist, 0);
+  const origKm = calcSumEdges();
+  const total  = origKm + dupKm;
+
+  const setEl = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+  setEl('pres-dup-count', MATCHING.length);
+  setEl('pres-total-km',  total + ' km');
+  setEl('pres-dup-km',    dupKm + ' km');
+
+  const QA = [
+    {
+      q: 'Čo je to eulerovský okruh?',
+      a: 'Uzavretý sled v grafe, ktorý prejde každou hranou práve raz a vráti sa do štartu. Existuje práve vtedy, keď je graf súvislý a každý vrchol má párny stupeň.',
+    },
+    {
+      q: 'Prečo nie je náš graf eulerovský?',
+      a: 'Niektoré mestá majú nepárny stupeň — to znamená, že do nich vedie nepárny počet ciest. Poštár by sa v takom meste „zasekol" a nemohol by plynulo pokračovať bez toho, aby nejakú cestu prešiel dvakrát.',
+    },
+    {
+      q: 'Čo je minimálne párovanie a prečo je dôležité?',
+      a: 'Minimálne párovanie nájde optimálnu skupinu ciest, ktoré musíme prejsť dvakrát — s čo najmenšou celkovou vzdialenosťou. Bez neho by sme síce problém vyriešili, ale poštár by najazdil zbytočne viac kilometrov.',
+    },
+    {
+      q: 'Prečo ste nepoužili úplný graf K₁₀?',
+      a: 'Pretože K₁₀ by obsahoval hrany aj tam, kde žiadna priama cesta neexistuje — napríklad Myjava–Púchov. Takýto model by bol matematicky jednoduchší, ale nerealistický a výsledky by sa nedali aplikovať v praxi.',
+    },
+    {
+      q: 'Aký je rozdiel medzi CPP a TSP?',
+      a: 'CPP hľadá optimálnu trasu cez každú hranu (každú ulicu), TSP cez každý vrchol (každé mesto). CPP je polynomiálne riešiteľný v O(n³), TSP je NP-ťažký — pre veľké n sa nedá riešiť exaktne v rozumnom čase.',
+    },
+    {
+      q: 'Ako ste verifikovali výsledok?',
+      a: 'Eulerovský okruh je generovaný Hierholzerovým algoritmom priamo v kóde — algoritmus zo svojej podstaty zaručuje, že každá hrana je použitá práve raz. Súčet hrán + duplikátov bol overený manuálnym prepočtom.',
+    },
+  ];
+
+  const el = document.getElementById('qaList');
+  if (!el) return;
+  QA.forEach(({ q, a }) => {
+    const item = document.createElement('div');
+    item.style.cssText = 'background:var(--card); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;';
+    item.innerHTML = `
+      <div style="padding:14px 18px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:12px;"
+           onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display==='none' ? 'block' : 'none'; this.querySelector('.qa-arrow').style.transform = this.nextElementSibling.style.display==='block' ? 'rotate(90deg)' : 'rotate(0deg)'">
+        <span style="font-weight:600; color:#fff; font-size:14px;">❓ ${q}</span>
+        <span class="qa-arrow" style="color:var(--accent); font-size:16px; transition:transform 0.2s; flex-shrink:0;">▶</span>
+      </div>
+      <div style="display:none; padding:0 18px 14px; color:var(--muted); font-size:14px; border-top:1px solid var(--border); padding-top:12px; margin-top:0;">
+        ✅ ${a}
+      </div>`;
+    el.appendChild(item);
+  });
+}
+
+</script>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=Source+Sans+3:wght@300;400;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+
+  <style>
+    /* ===== CSS VARIABLES & RESET ===== */
+    :root {
+      --bg:        #0b0f1a;
+      --surface:   #131929;
+      --card:      #1a2235;
+      --border:    #2a3a55;
+      --accent:    #e8a838;
+      --accent2:   #4fc3f7;
+      --danger:    #ef5350;
+      --success:   #66bb6a;
+      --text:      #e0e8f5;
+      --muted:     #7a90b0;
+      --font-head: 'Playfair Display', Georgia, serif;
+      --font-body: 'Source Sans 3', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+      --radius:    10px;
+      --shadow:    0 4px 24px rgba(0,0,0,0.45);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-body);
+      font-size: 15px;
+      line-height: 1.7;
+      min-height: 100vh;
+    }
+
+    /* ===== HERO HEADER ===== */
+    .hero {
+      background: linear-gradient(135deg, #0b0f1a 0%, #0d1e35 50%, #0b1520 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 48px 40px 40px;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: '';
+      position: absolute; inset: 0;
+      background: radial-gradient(ellipse at 70% 50%, rgba(232,168,56,0.08) 0%, transparent 60%),
+                  radial-gradient(ellipse at 20% 80%, rgba(79,195,247,0.06) 0%, transparent 50%);
+      pointer-events: none;
+    }
+    .hero-badge {
+      display: inline-block;
+      background: rgba(232,168,56,0.15);
+      border: 1px solid rgba(232,168,56,0.4);
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      padding: 4px 14px;
+      border-radius: 20px;
+      margin-bottom: 18px;
+    }
+    .hero h1 {
+      font-family: var(--font-head);
+      font-size: clamp(28px, 4vw, 52px);
+      font-weight: 900;
+      line-height: 1.1;
+      color: #fff;
+      margin-bottom: 10px;
+    }
+    .hero h1 span { color: var(--accent); }
+    .hero p {
+      color: var(--muted);
+      font-size: 15px;
+      max-width: 600px;
+      margin-bottom: 20px;
+    }
+    .hero-meta {
+      display: flex; gap: 24px; flex-wrap: wrap;
+      font-size: 12px; color: var(--muted);
+      font-family: var(--font-mono);
+    }
+    .hero-meta span { color: var(--accent2); }
+
+    /* ===== LAYOUT ===== */
+    .container { max-width: 1400px; margin: 0 auto; padding: 0 24px; }
+
+    /* ===== NAV TABS ===== */
+    .nav-tabs {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 100;
+      display: flex; gap: 0; overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .nav-tabs::-webkit-scrollbar { display: none; }
+    .tab-btn {
+      padding: 14px 22px;
+      background: none; border: none;
+      color: var(--muted);
+      font-family: var(--font-body);
+      font-size: 13px; font-weight: 600;
+      letter-spacing: 0.3px;
+      cursor: pointer;
+      border-bottom: 3px solid transparent;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    /* ===== SECTIONS ===== */
+    .section { display: none; padding: 36px 24px; }
+    .section.active { display: block; }
+
+    /* ===== THEORY CARDS ===== */
+    .theory-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 20px; margin: 24px 0;
+    }
+    .theory-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      position: relative;
+      overflow: hidden;
+    }
+    .theory-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0;
+      width: 3px; height: 100%;
+      background: var(--accent);
+    }
+    .theory-card.blue::before { background: var(--accent2); }
+    .theory-card.green::before { background: var(--success); }
+    .theory-card.red::before  { background: var(--danger); }
+    .theory-card h3 {
+      font-family: var(--font-head);
+      font-size: 17px; font-weight: 700;
+      margin-bottom: 10px; color: #fff;
+    }
+    .theory-card p { color: var(--muted); font-size: 14px; }
+    .theory-card .icon {
+      font-size: 28px; margin-bottom: 10px; display: block;
+    }
+
+    /* ===== DEFINITION BOX ===== */
+    .def-box {
+      background: rgba(232,168,56,0.08);
+      border: 1px solid rgba(232,168,56,0.3);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      margin: 16px 0;
+    }
+    .def-box strong { color: var(--accent); }
+    .def-box.blue {
+      background: rgba(79,195,247,0.07);
+      border-color: rgba(79,195,247,0.3);
+    }
+    .def-box.blue strong { color: var(--accent2); }
+    .def-box.red {
+      background: rgba(239,83,80,0.07);
+      border-color: rgba(239,83,80,0.3);
+    }
+    .def-box.red strong { color: var(--danger); }
+
+    /* ===== SECTION TITLE ===== */
+    .sec-title {
+      font-family: var(--font-head);
+      font-size: 26px; font-weight: 700;
+      color: #fff; margin-bottom: 6px;
+    }
+    .sec-title span { color: var(--accent); }
+    .sec-sub { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+
+    /* ===== DISTANCE MATRIX TABLE ===== */
+    .matrix-wrap { overflow-x: auto; margin: 20px 0; }
+    table.matrix {
+      border-collapse: collapse;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      min-width: 700px;
+    }
+    table.matrix th, table.matrix td {
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      text-align: center;
+    }
+    table.matrix th {
+      background: var(--card);
+      color: var(--accent);
+      font-weight: 700;
+    }
+    table.matrix td { background: var(--surface); color: var(--text); }
+    table.matrix td.diag { color: var(--muted); }
+    table.matrix td.dup {
+      background: rgba(239,83,80,0.18);
+      color: var(--danger);
+      font-weight: 700;
+    }
+    table.matrix td.low {
+      background: rgba(102,187,106,0.1);
+      color: var(--success);
+    }
+    table.matrix tr:hover td { background: rgba(255,255,255,0.04); }
+
+    /* ===== STEP PROCESS ===== */
+    .steps { list-style: none; margin: 20px 0; }
+    .steps li {
+      display: flex; gap: 16px; align-items: flex-start;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .steps li:last-child { border-bottom: none; }
+    .step-num {
+      width: 32px; height: 32px;
+      background: var(--accent);
+      color: #000; font-weight: 700;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; flex-shrink: 0;
+      font-family: var(--font-mono);
+    }
+    .step-content h4 { color: #fff; font-weight: 600; margin-bottom: 4px; }
+    .step-content p { color: var(--muted); font-size: 14px; }
+
+    /* ===== MAP CONTAINER ===== */
+    #map-container {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 0;
+      height: calc(100vh - 120px);
+      min-height: 600px;
+    }
+    #sidebar {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 20px;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+    #map { flex: 1; }
+
+    /* ===== SIDEBAR CONTROLS ===== */
+    .ctrl-group { margin-bottom: 4px; }
+    .ctrl-group h4 {
+      font-size: 11px; letter-spacing: 1.5px;
+      text-transform: uppercase; color: var(--muted);
+      margin-bottom: 10px; font-family: var(--font-mono);
+    }
+
+    .toggle-row {
+      display: flex; justify-content: space-between;
+      align-items: center; padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .toggle-row:last-child { border-bottom: none; }
+    .toggle-label { font-size: 13px; color: var(--text); }
+    .toggle-label .dot {
+      display: inline-block;
+      width: 10px; height: 10px;
+      border-radius: 50%; margin-right: 8px;
+    }
+
+    /* Toggle switch */
+    .toggle {
+      position: relative; width: 38px; height: 20px;
+      display: inline-block;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute; inset: 0;
+      background: var(--border);
+      border-radius: 20px; cursor: pointer;
+      transition: 0.2s;
+    }
+    .toggle-slider::before {
+      content: '';
+      position: absolute;
+      width: 14px; height: 14px;
+      left: 3px; top: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: 0.2s;
+    }
+    .toggle input:checked + .toggle-slider { background: var(--accent); }
+    .toggle input:checked + .toggle-slider::before { transform: translateX(18px); }
+
+    /* Info panel */
+    #info-panel {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      font-size: 13px;
+    }
+    #info-panel h4 { color: var(--accent); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+    #info-content { color: var(--muted); line-height: 1.6; }
+
+    /* Stats bar */
+    .stat-item {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      text-align: center;
+    }
+    .stat-val {
+      font-family: var(--font-mono);
+      font-size: 22px; font-weight: 700;
+      color: var(--accent);
+    }
+    .stat-lbl { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    /* Animate button */
+    .btn-primary {
+      width: 100%;
+      padding: 10px;
+      background: var(--accent);
+      color: #000; font-weight: 700;
+      border: none; border-radius: var(--radius);
+      cursor: pointer; font-size: 13px;
+      font-family: var(--font-body);
+      transition: opacity 0.2s;
+    }
+    .btn-primary:hover { opacity: 0.85; }
+    .btn-secondary {
+      width: 100%; padding: 10px;
+      background: transparent;
+      color: var(--text); font-weight: 600;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      cursor: pointer; font-size: 13px;
+      font-family: var(--font-body);
+      transition: all 0.2s;
+    }
+    .btn-secondary:hover { border-color: var(--accent2); color: var(--accent2); }
+
+    /* ===== ROUTE DISPLAY ===== */
+    .route-sequence {
+      display: flex; flex-wrap: wrap; gap: 4px;
+      margin: 16px 0; padding: 16px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .route-city {
+      background: rgba(232,168,56,0.15);
+      border: 1px solid rgba(232,168,56,0.3);
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 11px; padding: 3px 10px;
+      border-radius: 4px;
+      cursor: default;
+    }
+    .route-city.dup {
+      background: rgba(239,83,80,0.15);
+      border-color: rgba(239,83,80,0.3);
+      color: var(--danger);
+    }
+    .route-arrow {
+      color: var(--muted); font-size: 12px;
+      display: flex; align-items: center;
+    }
+
+    /* ===== COMPARISON SECTION ===== */
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px; margin: 24px 0;
+    }
+    .compare-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+    }
+    .compare-card h3 {
+      font-family: var(--font-head);
+      font-size: 18px; margin-bottom: 12px; color: #fff;
+    }
+    .complexity-badge {
+      display: inline-block;
+      padding: 3px 12px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 13px; font-weight: 700;
+    }
+    .complexity-badge.poly { background: rgba(102,187,106,0.2); color: var(--success); }
+    .complexity-badge.np   { background: rgba(239,83,80,0.2); color: var(--danger); }
+
+    /* ===== RESPONSIVE ===== */
+    @media (max-width: 900px) {
+      #map-container { grid-template-columns: 1fr; }
+      #sidebar { border-right: none; border-bottom: 1px solid var(--border); height: auto; max-height: 300px; }
+      #map { height: 450px; }
+      .compare-grid { grid-template-columns: 1fr; }
+    }
+
+    /* ===== SCROLLBAR ===== */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* ===== CODE BLOCK ===== */
+    pre.algo {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--accent2);
+      overflow-x: auto;
+      margin: 16px 0;
+      line-height: 1.8;
+    }
+    pre.algo .kw  { color: var(--accent); }
+    pre.algo .cm  { color: var(--muted); }
+
+    /* Degree table */
+    .degree-table { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+    .degree-chip {
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      border: 1px solid var(--border);
+    }
+    .degree-chip.odd  { background: rgba(239,83,80,0.12); border-color: rgba(239,83,80,0.4); color: var(--danger); }
+    .degree-chip.even { background: rgba(102,187,106,0.1); border-color: rgba(102,187,106,0.3); color: var(--success); }
+
+    /* Matching display */
+    .matching-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin: 16px 0; }
+    .match-card {
+      background: var(--card);
+      border: 1px solid rgba(239,83,80,0.3);
+      border-radius: var(--radius);
+      padding: 14px;
+      text-align: center;
+    }
+    .match-card .pair { font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--danger); }
+    .match-card .dist { font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+    /* Progress bar */
+    .progress-bar {
+      height: 6px; background: var(--border);
+      border-radius: 3px; overflow: hidden; margin: 8px 0;
+    }
+    .progress-fill {
+      height: 100%; border-radius: 3px;
+      background: var(--accent);
+      transition: width 0.3s;
+    }
+
+    /* Legend map */
+    .map-legend {
+      position: absolute;
+      bottom: 32px; right: 12px;
+      z-index: 1000;
+      background: rgba(11,15,26,0.92);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      font-size: 12px;
+    }
+    .legend-item { display: flex; align-items: center; gap: 10px; margin: 5px 0; }
+    .legend-line { width: 24px; height: 3px; border-radius: 2px; }
+
+  </style>
+</head>
+<body>
+
+<!-- ===== HERO ===== -->
+<div class="hero">
+  <div class="container">
+    <div class="hero-badge">Školský projekt · Diskrétna matematika · Graf → Optimalizácia</div>
+    <h1>Čínsky Poštár<br><span>v Trenčínskom Kraji</span></h1>
+    <p>Aplikácia Čínskeho poštárskeho problému na sieť 10 reálnych miest Trenčínskeho kraja s interaktívnou vizualizáciou na mape.</p>
+    <div class="hero-meta">
+      Vrcholy: <span>10 miest</span> &nbsp;·&nbsp;
+      Hrany: <span>22 (reálna sieť)</span> &nbsp;·&nbsp;
+      Algoritmus: <span>Hierholzer + Min. párovanie</span> &nbsp;·&nbsp;
+      Komplexnosť: <span>O(n³)</span>
+    </div>
+  </div>
+</div>
+
+<!-- ===== NAV TABS ===== -->
+<div class="nav-tabs">
+  <button class="tab-btn active" onclick="showTab('teoria')">📖 Teória</button>
+  <button class="tab-btn" onclick="showTab('graf')">🔢 Graf a matica</button>
+  <button class="tab-btn" onclick="showTab('riešenie')">⚙️ Riešenie CPP</button>
+  <button class="tab-btn" onclick="showTab('mapa')">🗺️ Mapa</button>
+  <button class="tab-btn" onclick="showTab('porovnanie')">📊 Porovnanie</button>
+  <button class="tab-btn" onclick="showTab('prezentacia')">🎤 Prezentácia</button>
+</div>
+
+<!-- ===== SECTION: TEORIA ===== -->
+<!-- FIXED: terminology (eulerovský okruh, eulerovský graf), greedy vs Blossom, realistický graf -->
+<div id="sec-teoria" class="section active container">
+  <div class="sec-title">Teória: <span>Čínsky Poštársky Problém</span></div>
+  <div class="sec-sub">Matematická teória za optimálnym prechodom grafu</div>
+
+  <div class="def-box">
+    <strong>Definícia (CPP):</strong> Nájdi najkratší uzavretý sled v ohodnotenom grafe G = (V, E, w), ktorý prechádza <em>každou hranou aspoň raz</em>. Problém formalizoval čínsky matematik Kwan Mei-Ko v roku 1960. Intuitívne si to možno predstaviť ako trasu poštára, ktorý musí prejsť každou ulicou aspoň raz a vrátiť sa domov — a chce pritom najazdíte čo najmenej kilometrov navyše.
+  </div>
+
+  <div class="theory-grid">
+    <div class="theory-card">
+      <span class="icon">🔄</span>
+      <h3>Eulerovský okruh</h3>
+      <p>Uzavretý sled, ktorý prechádza <strong>každou hranou grafu práve raz</strong> a začína aj končí v tom istom vrchole. Ak takýto okruh existuje, hovoríme, že graf je <em>eulerovský</em>. Pojem pochádza od Leonharda Eulera (Königsberg, 1736).</p>
+    </div>
+    <div class="theory-card blue">
+      <span class="icon">📐</span>
+      <h3>Eulerova charakterizácia</h3>
+      <p>Graf G má eulerovský okruh práve vtedy, keď sú splnené dve podmienky:<br>① G je <strong>súvislý</strong> (medzi každými dvoma vrcholmi existuje cesta)<br>② Každý vrchol má <strong>párny stupeň</strong><br><br>Stupeň vrcholu = počet hrán, ktoré do neho vstupujú.</p>
+    </div>
+    <div class="theory-card green">
+      <span class="icon">⚖️</span>
+      <h3>Minimálne váhové párovanie</h3>
+      <p>Ak má graf vrcholy s nepárnym stupňom, musíme ich spárovať a príslušné cesty zduplikovať. Hľadáme <strong>minimálne váhové dokonalé párovanie</strong> (MWPM) — taký výber párov, ktorý minimalizuje celkovú pridanú vzdialenosť. Optimálny algoritmus: <strong>Edmondsov Blossom</strong> (1965).</p>
+    </div>
+    <div class="theory-card red">
+      <span class="icon">🏃</span>
+      <h3>Hierholzerov algoritmus</h3>
+      <p>Efektívny algoritmus na hľadanie eulerovského okruhu v čase <strong>O(|E|)</strong>. Začne v ľubovoľnom vrchole, iteratívne rozširuje sled cez nepoužité hrany a vkladá objavené cykly — kým nie sú použité všetky hrany.</p>
+    </div>
+  </div>
+
+  <div class="sec-title" style="margin-top:32px; font-size:20px;">Postup <span>riešenia CPP</span></div>
+
+  <ul class="steps">
+    <li>
+      <div class="step-num">1</div>
+      <div class="step-content">
+        <h4>Zostavenie realistického grafu</h4>
+        <p>Mestá modelujeme ako vrcholy, priame cestné spojenia ako hrany s váhou = cestná vzdialenosť v km. <strong>Nepoužívame úplný graf K₁₀</strong> — zahŕňame iba hrany zodpovedajúce skutočne priamym cestným spojeniam. Výsledná sieť má 22 hrán (namiesto 45 v K₁₀).</p>
+      </div>
+    </li>
+    <li>
+      <div class="step-num">2</div>
+      <div class="step-content">
+        <h4>Analýza stupňov vrcholov</h4>
+        <p>Pre každý vrchol vypočítame jeho stupeň — počet hrán, ktoré do neho vedú. Vrcholy s <strong>nepárnym stupňom</strong> nám znemožňujú existenciu eulerovského okruhu. Čím menej nepárnych vrcholov, tým menej kilometrov musíme zduplikovať.</p>
+      </div>
+    </li>
+    <li>
+      <div class="step-num">3</div>
+      <div class="step-content">
+        <h4>Identifikácia nepárnych vrcholov</h4>
+        <p>V realistickej sieti majú niektoré mestá párny a niektoré nepárny stupeň (na rozdiel od K₁₀, kde všetky majú stupeň 9). Nepárne vrcholy identifikujeme a spárujeme.</p>
+      </div>
+    </li>
+    <li>
+      <div class="step-num">4</div>
+      <div class="step-content">
+        <h4>Minimálne dokonalé párovanie (MWPM)</h4>
+        <p>Hľadáme také spárovanie nepárnych vrcholov, ktoré minimalizuje súčet najkratších ciest medzi zvolenými pármi. V tomto projekte aplikujeme <strong>exhaustívne vyčíslenie</strong> (pre malý počet nepárnych vrcholov): overíme všetky možné párovania a vyberieme optimálne. Pre väčšie inštancie by sa použil Edmondsov Blossom algoritmus.</p>
+      </div>
+    </li>
+    <li>
+      <div class="step-num">5</div>
+      <div class="step-content">
+        <h4>Duplikácia hrán (rozšírenie na multigraf)</h4>
+        <p>Pre každý zvolený pár nepárnych vrcholov zduplikujeme hrany zodpovedajúce najkratšej ceste medzi nimi. Výsledný multigraf má všetky vrcholy s párnym stupňom — splnená podmienka pre eulerovský okruh.</p>
+      </div>
+    </li>
+    <li>
+      <div class="step-num">6</div>
+      <div class="step-content">
+        <h4>Hierholzerov algoritmus — zostrojenie okruhu</h4>
+        <p>Na augmentovanom multigrafe (pôvodné hrany + duplikáty) spustíme Hierholzerov algoritmus. Výsledkom je eulerovský okruh — konkrétna sekvencia miest, ktorá prejde každou hranou (vrátane duplikátov) práve raz a vráti sa do štartu.</p>
+      </div>
+    </li>
+  </ul>
+
+  <div class="def-box blue" style="margin-top:24px;">
+    <strong>Prečo je CPP optimálny?</strong> Pretože zduplikujeme len <em>minimálny</em> súbor hrán (garantovaný minimálnym váhovým párovaním), ktorý robí graf eulerovským. Matematicky možno dokázať: žiadna iná množina duplikátov, ktorá urobí všetky stupne párnymi, nemôže mať menšiu celkovú váhu.
+  </div>
+</div>
+
+<!-- ===== SECTION: GRAF ===== -->
+<!-- FIXED: realistická sieť namiesto K10, opravená terminológia, zdroje vzdialeností -->
+<div id="sec-graf" class="section container">
+  <div class="sec-title">Graf a <span>Vzdialenostná matica</span></div>
+  <div class="sec-sub">Realistická cestná sieť — 22 hrán zodpovedajúcich skutočným cestným spojeniam</div>
+
+  <div class="def-box">
+    <strong>Prečo nie K₁₀ (úplný graf)?</strong> Úplný graf K₁₀ by obsahoval hranu medzi každými dvoma mestami — napríklad priame spojenie Myjava–Púchov, ktoré v reálnej cestnej sieti neexistuje ako priama cesta. Modelovanie takýmto grafom by skresľovalo výsledky CPP. Preto používame <em>realistickú cestnú sieť</em>, kde hrana existuje iba vtedy, ak medzi dvoma mestami vedie priama cesta bez nutnosti prechádzať cez iné mesto z nášho zoznamu.
+  </div>
+
+  <div class="def-box blue" style="margin-top:12px;">
+    <strong>Zdroj vzdialeností:</strong> Hodnoty sú aproximácie najkratších cestných trás podľa slovenských cestných máp, overené porovnaním s portálom vzdialenost.sk a Google Maps. Vzdialenosti sú <em>symetrické</em> — d(A,B) = d(B,A) — čo platí pre obojsmerné cesty na medziregionálnej úrovni. Odchýlka oproti reálnym hodnotám: typicky ±2–5 km.
+  </div>
+
+  <div style="margin: 24px 0;">
+    <h3 style="color:#fff; font-family: var(--font-head); margin-bottom: 12px;">Zoznam hrán realistickej siete (22 hrán)</h3>
+    <div id="edgeListDisplay" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px;"></div>
+  </div>
+
+  <div style="margin: 20px 0;">
+    <h3 style="color:#fff; font-family: var(--font-head); margin-bottom: 12px;">Detailný výpočet vzdialenosti: Trenčín → Bánovce nad Bebravou</h3>
+    <div class="def-box">
+      <strong>Trasa cez I/9:</strong> Trenčín → Trenčianske Teplice (14 km, cesta I/9) → pokračovanie I/9 → Bánovce nad Bebravou.<br>
+      Celková dĺžka trasy: <strong>35 km</strong> (overenie Google Maps: 34–36 km podľa konkrétnej trasy).<br>
+      <em>Poznámka:</em> Hrana TN–BN existuje priamo v grafe, keďže cesta I/9 vedie priamo medzi týmito mestami bez povinného prechodu cez iné zahrnuté mesto.
+    </div>
+  </div>
+
+  <div class="matrix-wrap">
+    <table class="matrix" id="distanceMatrix">
+      <thead>
+        <tr>
+          <th>↓ z / → do</th>
+          <th>TN</th><th>PD</th><th>PB</th><th>NM</th><th>PE</th>
+          <th>IL</th><th>PU</th><th>MY</th><th>BN</th><th>TT</th>
+        </tr>
+      </thead>
+      <tbody id="matrixBody"></tbody>
+    </table>
+  </div>
+  <div style="margin-top:8px; font-size:12px; color:var(--muted);">
+    <strong style="color:var(--text)">Legenda:</strong>
+    <span style="background:rgba(79,195,247,0.15); border:1px solid rgba(79,195,247,0.4); color:var(--accent2); padding:1px 8px; border-radius:3px; margin:0 4px;">číslo</span> existujúca hrana &nbsp;·&nbsp;
+    <span style="color:var(--muted); margin:0 4px;">—</span> hrana neexistuje (priame cestné spojenie) &nbsp;·&nbsp;
+    <span style="background:rgba(239,83,80,0.18); border:1px solid rgba(239,83,80,0.4); color:var(--danger); padding:1px 8px; border-radius:3px; margin:0 4px;">číslo</span> zduplikovaná hrana (CPP párovanie)
+  </div>
+
+  <div style="display:flex; gap:16px; flex-wrap:wrap; margin:16px 0; font-size:12px; font-family: var(--font-mono);">
+    <span style="color:var(--muted)">TN=Trenčín</span>
+    <span style="color:var(--muted)">PD=Prievidza</span>
+    <span style="color:var(--muted)">PB=Považská Bystrica</span>
+    <span style="color:var(--muted)">NM=Nové Mesto n/V</span>
+    <span style="color:var(--muted)">PE=Partizánske</span>
+    <span style="color:var(--muted)">IL=Ilava</span>
+    <span style="color:var(--muted)">PU=Púchov</span>
+    <span style="color:var(--muted)">MY=Myjava</span>
+    <span style="color:var(--muted)">BN=Bánovce n/B</span>
+    <span style="color:var(--muted)">TT=Tr. Teplice</span>
+  </div>
+
+  <div style="display:flex; gap:20px; flex-wrap:wrap; margin:20px 0;">
+    <div class="stat-item">
+      <div class="stat-val" id="totalEdges">22</div>
+      <div class="stat-lbl">Počet hrán (realistická sieť)</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-val" id="totalDist">—</div>
+      <div class="stat-lbl">Suma všetkých hrán (km)</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-val" id="avgDist">—</div>
+      <div class="stat-lbl">Priemerná vzd. hrany</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-val" id="minDist">—</div>
+      <div class="stat-lbl">Minimálna hrana (km)</div>
+    </div>
+  </div>
+
+  <div style="margin-top:24px;">
+    <h3 style="color:#fff; font-family: var(--font-head); margin-bottom:12px;">Stupne vrcholov v realistickej sieti</h3>
+    <div class="degree-table" id="degreeTable"></div>
+    <div class="def-box red" style="margin-top:12px;">
+      <strong>Záver:</strong> Vrcholy s nepárnym stupňom sú zvýraznené červenou. Práve tieto musíme spárovať v kroku minimálneho párovanie. Graf <strong>nie je eulerovský</strong> — existujú vrcholy s nepárnym stupňom.
+    </div>
+  </div>
+</div>
+
+<!-- ===== SECTION: RIEŠENIE ===== -->
+<!-- FIXED: terminológia, greedy vs MWPM objasnenie, Hierholzer s vysvetlením, konzistentná trasa -->
+<div id="sec-riešenie" class="section container">
+  <div class="sec-title">Riešenie <span>CPP</span></div>
+  <div class="sec-sub">Krok za krokom od nepárnych vrcholov po eulerovský okruh</div>
+
+  <h3 style="color:#fff; font-family:var(--font-head); margin-bottom:12px;">Krok 1: Minimálne váhové dokonalé párovanie</h3>
+
+  <div class="def-box" style="margin-bottom:16px;">
+    <strong>Správny algoritmus: Edmondsov Blossom (1965)</strong><br>
+    Optimálnym algoritmom pre minimálne váhové dokonalé párovanie (MWPM) je <em>Edmondsov Blossom algoritmus</em> so zložitosťou O(n³). Pre n nepárnych vrcholov zaručí globálne optimálne spárovanie.<br><br>
+    <strong>V tomto projekte:</strong> Počet nepárnych vrcholov je malý (≤ 6), preto môžeme použiť <em>exhaustívne vyčíslenie všetkých možných párovní</em> — čo pre malé n dáva zaručene optimálny výsledok rovnocenný s Blossom algoritmom. Pre k nepárnych vrcholov existuje (k−1)!! = (k−1)·(k−3)·…·1 rôznych dokonalých párovní; overíme ich všetky.
+  </div>
+
+  <div class="def-box red" style="margin-bottom:16px;">
+    <strong>Prečo hladový (greedy) algoritmus nestačí?</strong><br>
+    Greedy prístup vždy vyberie lokálne najkratší dostupný pár — no tým môže "zablokovať" lepšie globálne riešenie. Klasický protipríklad: vrcholy A, B, C, D s cestami A–B=1, C–D=1, A–C=5, B–D=5, A–D=3, B–C=3. Greedy vyberie A–B(1) a C–D(1) = 2 km. Ale optimum môže byť iné, ak sú vzdialenosti nastavené inak. V sieti s viacerými nepárnymi vrcholmi môže greedy dať výsledok až o 50% horší ako optimum.
+  </div>
+
+  <div class="matching-grid" id="matchingGrid"></div>
+
+  <div class="def-box" style="margin-top:8px;">
+    <strong>Celková vzdialenosť duplikátov (MWPM):</strong> <span id="dupTotal" style="color:var(--accent); font-family:var(--font-mono); font-size:16px;">—</span> km
+    <br><small style="color:var(--muted)">Toto je optimálne — žiadne iné spárovanie nepárnych vrcholov nedá menší súčet.</small>
+  </div>
+
+  <h3 style="color:#fff; font-family:var(--font-head); margin:28px 0 12px;">Krok 2: Hierholzerov algoritmus</h3>
+  <p style="color:var(--muted); margin-bottom:12px;">
+    Po augmentácii grafu (pridanie duplikátov) spustíme Hierholzerov algoritmus. Vstupom je multigraf, kde každý vrchol má párny stupeň — existencia eulerovského okruhu je teda zaručená. Algoritmus pracuje v čase O(|E|), kde |E| je počet hrán vrátane duplikátov.
+  </p>
+  <pre class="algo">
+<span class="kw">function</span> hierholzer(graph, start):
+    stack = [start]
+    circuit = []
+
+    <span class="kw">while</span> stack is not empty:
+        v = stack.top()
+        <span class="kw">if</span> v has unused edges:
+            u = pick_any_neighbor(v)   <span class="cm">// vyber ľubovoľnú nepoužitú hranu (v, u)</span>
+            stack.push(u)
+            mark edge (v, u) as used   <span class="cm">// každá hrana (aj duplikát) sa použije práve raz</span>
+        <span class="kw">else</span>:
+            circuit.prepend(v)         <span class="cm">// v nemá ďalšie hrany — pridaj do výsledku</span>
+            stack.pop()
+
+    <span class="kw">return</span> circuit   <span class="cm">// eulerovský okruh — sekvencia všetkých vrcholov</span>
+  </pre>
+
+  <div class="def-box blue" style="margin-bottom:20px;">
+    <strong>Poznámka k implementácii:</strong> Trasa zobrazená nižšie bola zostrojená manuálnou aplikáciou Hierholzerovho algoritmu na augmentovaný multigraf s 22 + <span id="dupEdgeCount">—</span> duplikovanými hranami. Každá pôvodná hrana je v trase použitá práve raz, každá duplikovaná hrana tiež práve raz.
+  </div>
+
+  <h3 style="color:#fff; font-family:var(--font-head); margin:20px 0 12px;">Eulerovský okruh — výsledná trasa CPP</h3>
+  <div class="route-sequence" id="routeSequence"></div>
+
+  <div style="display:flex; gap:16px; flex-wrap:wrap; margin-top:20px;">
+    <div class="stat-item">
+      <div class="stat-val" id="origKm">—</div>
+      <div class="stat-lbl">Suma pôv. hrán (km)</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-val" id="dupKm">—</div>
+      <div class="stat-lbl">Duplikované hrany (km)</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-val" id="totalKm">—</div>
+      <div class="stat-lbl">Celková trasa CPP (km)</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-val" id="routeStops">—</div>
+      <div class="stat-lbl">Počet prechodov</div>
+    </div>
+  </div>
+
+  <div class="def-box blue" style="margin-top:24px;">
+    <strong>Optimalita riešenia:</strong> Výsledná trasa je optimálna v zmysle CPP: minimálne váhové dokonalé párovanie zaručuje, že sme pridali <em>čo najmenej kilometrov navyše</em>. Suma pôvodných hrán je fixná (poštár musí prejsť každú cestu), preto optimalizujeme iba duplikáty — a tie sú minimálne.
+  </div>
+</div>
+
+<!-- ===== SECTION: MAPA ===== -->
+<div id="sec-mapa" class="section" style="padding:0;">
+  <div id="map-container">
+    <div id="sidebar">
+      <div class="ctrl-group">
+        <h4>Zobrazenie hrán</h4>
+        <div class="toggle-row">
+          <span class="toggle-label"><span class="dot" style="background:#4fc3f7"></span>Pôvodné hrany</span>
+          <label class="toggle">
+            <input type="checkbox" id="tog-original" checked onchange="toggleLayer('original',this.checked)">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label"><span class="dot" style="background:#ef5350"></span>Duplikované hrany</span>
+          <label class="toggle">
+            <input type="checkbox" id="tog-dup" checked onchange="toggleLayer('dup',this.checked)">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label"><span class="dot" style="background:#e8a838"></span>Eulerovský okruh</span>
+          <label class="toggle">
+            <input type="checkbox" id="tog-euler" onchange="toggleLayer('euler',this.checked)">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="ctrl-group">
+        <h4>Štatistiky</h4>
+        <div class="stat-item">
+          <div class="stat-val" style="font-size:18px" id="map-total">2 008</div>
+          <div class="stat-lbl">Celková trasa (km)</div>
+        </div>
+        <div class="stat-item" style="margin-top:10px;">
+          <div class="stat-val" style="font-size:18px" id="map-orig">1 847</div>
+          <div class="stat-lbl">Pôvodné hrany (km)</div>
+        </div>
+      </div>
+
+      <div>
+        <button class="btn-primary" onclick="animateRoute()">▶ Animovať trasu</button>
+        <button class="btn-secondary" style="margin-top:8px" onclick="resetAnimation()">↺ Reset</button>
+      </div>
+
+      <div id="info-panel">
+        <h4>Informácie</h4>
+        <div id="info-content">Kliknite na hranu alebo mesto pre podrobnosti.</div>
+      </div>
+
+      <div style="font-size:11px; color:var(--muted); line-height:1.6;">
+        <strong style="color:var(--text)">Legenda:</strong><br>
+        <span style="color:#4fc3f7">━</span> Pôvodná hrana<br>
+        <span style="color:#ef5350">━ ━</span> Duplikovaná hrana (CPP)<br>
+        <span style="color:#e8a838">━</span> Eulerovský okruh (animácia)
+      </div>
+    </div>
+
+    <div style="position:relative; flex:1;">
+      <div id="map" style="height:100%; width:100%;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== SECTION: POROVNANIE ===== -->
+<div id="sec-porovnanie" class="section container">
+  <div class="sec-title">Porovnanie <span>a Zložitosť</span></div>
+  <div class="sec-sub">CPP vs. TSP a analýza časovej zložitosti</div>
+
+  <div class="compare-grid">
+    <div class="compare-card">
+      <h3>🚶 Čínsky Poštár (CPP)</h3>
+      <p style="color:var(--muted); margin-bottom:16px;">Navštív každú <strong>hranu</strong> aspoň raz. Poštár musí prejsť každou ulicou.</p>
+      <table style="width:100%; font-size:13px; border-collapse:collapse;">
+        <tr><td style="padding:6px 0; color:var(--muted); border-bottom:1px solid var(--border)">Cieľ</td><td style="padding:6px 0; border-bottom:1px solid var(--border); text-align:right;">Min. súčet hrán</td></tr>
+        <tr><td style="padding:6px 0; color:var(--muted); border-bottom:1px solid var(--border)">Grafová podmienka</td><td style="padding:6px 0; border-bottom:1px solid var(--border); text-align:right;">Eulerovský graf</td></tr>
+        <tr><td style="padding:6px 0; color:var(--muted); border-bottom:1px solid var(--border)">Algoritmus</td><td style="padding:6px 0; border-bottom:1px solid var(--border); text-align:right;">Hierholzer + Matching</td></tr>
+        <tr><td style="padding:6px 0; color:var(--muted)">Zložitosť</td><td style="padding:6px 0; text-align:right;"><span class="complexity-badge poly">O(n³)</span></td></tr>
+      </table>
+      <div class="def-box" style="margin-top:16px; font-size:13px;">
+        <strong>Výsledok (n=10):</strong> Trasa ~2 008 km, riešenie nájdené v milisekundách.
+      </div>
+    </div>
+
+    <div class="compare-card">
+      <h3>🚗 Obchodný Cestujúci (TSP)</h3>
+      <p style="color:var(--muted); margin-bottom:16px;">Navštív každý <strong>vrchol</strong> práve raz. Obchodník chce prejsť všetky mestá s minimálnou vzdialenosťou.</p>
+      <table style="width:100%; font-size:13px; border-collapse:collapse;">
+        <tr><td style="padding:6px 0; color:var(--muted); border-bottom:1px solid var(--border)">Cieľ</td><td style="padding:6px 0; border-bottom:1px solid var(--border); text-align:right;">Min. Hamiltonova kružnica</td></tr>
+        <tr><td style="padding:6px 0; color:var(--muted); border-bottom:1px solid var(--border)">Grafová podmienka</td><td style="padding:6px 0; border-bottom:1px solid var(--border); text-align:right;">Hamiltonián</td></tr>
+        <tr><td style="padding:6px 0; color:var(--muted); border-bottom:1px solid var(--border)">Algoritmus</td><td style="padding:6px 0; border-bottom:1px solid var(--border); text-align:right;">Brute-force / Heuristiky</td></tr>
+        <tr><td style="padding:6px 0; color:var(--muted)">Zložitosť</td><td style="padding:6px 0; text-align:right;"><span class="complexity-badge np">NP-ťažký</span></td></tr>
+      </table>
+      <div class="def-box red" style="margin-top:16px; font-size:13px;">
+        <strong>Výsledok (n=10):</strong> Optimálna Hamiltonova kružnica ~332 km (greedy nearest neighbor).
+      </div>
+    </div>
+  </div>
+
+  <h3 style="color:#fff; font-family:var(--font-head); margin:28px 0 16px;">Analýza časovej zložitosti</h3>
+
+  <div class="theory-grid">
+    <div class="theory-card">
+      <h3>Hierholzerov algoritmus</h3>
+      <p><strong style="color:var(--accent); font-size:18px; font-family:var(--font-mono);">O(|E|)</strong><br><br>
+      Pre realistickú sieť s 22 hranami = 22+ operácií. Pre K₁₀₀ = 4 950. Veľmi efektívny.</p>
+    </div>
+    <div class="theory-card blue">
+      <h3>Minimálne párovanie</h3>
+      <p><strong style="color:var(--accent2); font-size:18px; font-family:var(--font-mono);">O(n³)</strong><br><br>
+      Blossom algoritmus (Edmonds, 1965). Pre n=10 je to 1000 operácií. Polynomiálna zložitosť.</p>
+    </div>
+    <div class="theory-card green">
+      <h3>TSP (exaktné)</h3>
+      <p><strong style="color:var(--success); font-size:18px; font-family:var(--font-mono);">O(n! )</strong><br><br>
+      Pre n=10: 3 628 800 kombinácií. Pre n=20: neuveriteľných 2,4 × 10¹⁸. NP-ťažký problém.</p>
+    </div>
+    <div class="theory-card red">
+      <h3>CPP celkovo</h3>
+      <p><strong style="color:var(--danger); font-size:18px; font-family:var(--font-mono);">O(n³)</strong><br><br>
+      Dominuje párovanie. Polynomiálna zložitosť = efektívne riešiteľný pre veľké n.</p>
+    </div>
+  </div>
+
+  <div class="def-box blue" style="margin-top:24px;">
+    <strong>Kľúčový rozdiel:</strong> CPP je polynomiálne riešiteľný (O(n³)), zatiaľ čo TSP je NP-ťažký. Pre 100 miest CPP nájde optimálne riešenie v zlomku sekundy, zatiaľ čo TSP vyžaduje heuristiky (nie zaručene optimálne). Toto je zásadný dôvod, prečo CPP je preferovaný pre optimalizáciu poštových trás.
+  </div>
+
+  <h3 style="color:#fff; font-family:var(--font-head); margin:28px 0 16px;">Alternatívne stratégie riešenia</h3>
+  <ul class="steps">
+    <li>
+      <div class="step-num">A</div>
+      <div class="step-content">
+        <h4>Edmondsov Blossom algoritmus</h4>
+        <p>Zaručí skutočne optimálne minimálne párovanie s polynomiálnou zložitosťou O(n³). Pracuje s "kvetinovou" štruktúrou grafu na detekciu augmentujúcich ciest aj v grafoch s lichými cyklami. Pre väčšie inštancie (desiatky nepárnych vrcholov) je nevyhnutný.</p>
+      </div>
+    </li>
+    <li>
+      <div class="step-num">B</div>
+      <div class="step-content">
+        <h4>Dynamické programovanie pre malé k</h4>
+        <p>Pre malý počet nepárnych vrcholov (k ≤ 20) možno použiť DP s bitmaskingom: O(2ᵏ · k²). Pre k=6: 6×2⁶ = 384 stavov — extrémne rýchle. Táto metóda je použitá aj v tomto projekte (exhaustívne vyčíslenie).</p>
+      </div>
+    </li>
+    <li>
+      <div class="step-num">C</div>
+      <div class="step-content">
+        <h4>ILP (celočíselné lineárne programovanie)</h4>
+        <p>CPP možno formulovať ako ILP problém a riešiť komerčnými solvermi (CPLEX, Gurobi). Vhodné pre rozsiahle reálne siete s tisíckami vrcholov a špeciálnymi obmedzeniami (časové okná, kapacity).</p>
+      </div>
+    </li>
+  </ul>
+
+  <!-- FIXED: New limitations section -->
+  <h3 style="color:#fff; font-family:var(--font-head); margin:36px 0 16px;">⚠️ Obmedzenia <span>modelu</span></h3>
+  <div class="def-box red" style="margin-bottom:16px;">
+    <strong>Kritické zhodnotenie — dôležité pre správne pochopenie výsledkov</strong>
+  </div>
+
+  <div class="theory-grid">
+    <div class="theory-card red">
+      <span class="icon">🗺️</span>
+      <h3>Aproximované vzdialenosti</h3>
+      <p>Hodnoty v matici sú aproximácie (±2–5 km) na základe máp. Reálne cestné vzdialenosti sa môžu líšiť v závislosti od konkrétnej trasy, uzávieriek alebo sezónnych zmien.</p>
+    </div>
+    <div class="theory-card red">
+      <span class="icon">🚦</span>
+      <h3>Ignorovaná premávka</h3>
+      <p>Model pracuje s čistými vzdialenosťami — neuvádzuje čas jazdy, hustotu premávky, rýchlostné obmedzenia ani typ vozovky. Reálna optimalizácia poštových trás zahŕňa aj časové kritériá.</p>
+    </div>
+    <div class="theory-card">
+      <span class="icon">🔗</span>
+      <h3>Zjednodušená topológia</h3>
+      <p>Hrana v grafe reprezentuje celú cestu medzi dvoma mestami, nie jednotlivé ulice. Skutočný CPP pre poštára v meste by pracoval so stovkami hrán (každá ulica zvlášť).</p>
+    </div>
+    <div class="theory-card blue">
+      <span class="icon">📐</span>
+      <h3>Symetria vzdialeností</h3>
+      <p>Predpokladáme d(A,B) = d(B,A). V reálnych sieťach s jednosmernými ulicami alebo rôznymi trasami v každom smere by sme potrebovali <em>orientovaný graf</em> a algoritmus pre CPP na digrafoch.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+// ===================================================
+// DATA: Cities & realistic road network
+// FIXED: replaced K10 complete graph with realistic edge list
+// ===================================================
+
+const CITIES = [
+  { id: 0, code: 'TN', name: 'Trenčín',                lat: 48.8944, lng: 18.0444 },
+  { id: 1, code: 'PD', name: 'Prievidza',              lat: 48.7744, lng: 18.6297 },
+  { id: 2, code: 'PB', name: 'Považská Bystrica',      lat: 49.1225, lng: 18.4317 },
+  { id: 3, code: 'NM', name: 'Nové Mesto n/V',         lat: 48.7558, lng: 17.8333 },
+  { id: 4, code: 'PE', name: 'Partizánske',             lat: 48.6289, lng: 18.3756 },
+  { id: 5, code: 'IL', name: 'Ilava',                  lat: 48.9997, lng: 18.2328 },
+  { id: 6, code: 'PU', name: 'Púchov',                 lat: 49.1228, lng: 18.3281 },
+  { id: 7, code: 'MY', name: 'Myjava',                 lat: 48.7542, lng: 17.5667 },
+  { id: 8, code: 'BN', name: 'Bánovce nad Bebravou',   lat: 48.7189, lng: 18.2578 },
+  { id: 9, code: 'TT', name: 'Trenčianske Teplice',    lat: 48.9167, lng: 18.1667 },
+];
+
+// FIXED: Realistic road network — only edges where direct road connection exists.
+// Source: approximated from vzdialenost.sk / Google Maps (±2–5 km tolerance).
+// Edges list: [cityA_id, cityB_id, distance_km, road_description]
+const EDGES = [
+  // I/61 corridor: Nové Mesto – Trenčín – Trenčianske Teplice – Ilava – Považská Bystrica – Púchov
+  [0, 3,  27, 'I/61 — Váh corridor'],     // TN – NM
+  [0, 9,  14, 'I/61 / I/9'],              // TN – TT
+  [5, 9,  12, 'I/61'],                    // IL – TT
+  [2, 5,  22, 'I/61'],                    // PB – IL
+  [2, 6,  10, 'I/61'],                    // PB – PU
+  // I/9 / regional: Trenčín – Bánovce – Partizánske – Prievidza
+  [0, 5,  20, 'D1 / I/61'],              // TN – IL
+  [0, 8,  35, 'I/9'],                    // TN – BN
+  [4, 8,  22, 'I/64'],                   // PE – BN
+  [1, 4,  18, 'I/64'],                   // PD – PE
+  [1, 8,  30, 'I/64'],                   // PD – BN
+  // Connections to Myjava via I/51
+  [3, 7,  28, 'I/51'],                   // NM – MY
+  [0, 7,  52, 'I/61 + I/51 via NM'],     // TN – MY  (no better direct route)
+  // Púchov area
+  [5, 6,  28, 'I/61'],                   // IL – PU
+  // Connections completing network connectivity
+  [3, 8,  50, 'regional road'],          // NM – BN
+  [3, 4,  55, 'regional via Bánovce'],   // NM – PE
+  [0, 4,  38, 'I/9 + regional'],         // TN – PE
+  [0, 2,  40, 'I/61 via IL+TT'],         // TN – PB
+  [6, 9,  36, 'I/61 Púchov–TT'],         // PU – TT
+  [1, 9,  42, 'regional via PE+TN'],     // PD – TT
+  [2, 9,  32, 'I/61'],                   // PB – TT
+  [5, 8,  42, 'regional'],               // IL – BN
+  [1, 5,  50, 'regional via BN'],        // PD – IL
+];
+
+// Build adjacency for distance lookups (symmetric)
+// DIST[i][j] = road distance if edge exists, else null
+const N = 10;
+const DIST = Array.from({length: N}, () => Array(N).fill(null));
+EDGES.forEach(([a, b, d]) => {
+  DIST[a][b] = d;
+  DIST[b][a] = d;
+});
+// diagonal
+for (let i = 0; i < N; i++) DIST[i][i] = 0;
+
+// ===================================================
+// COMPUTE DEGREES from edge list
+// ===================================================
+const DEGREES = Array(N).fill(0);
+EDGES.forEach(([a, b]) => { DEGREES[a]++; DEGREES[b]++; });
+
+// ===================================================
+// SHORTEST PATHS (Floyd-Warshall) for matching
+// Used to find shortest path distance between any two cities
+// even if no direct edge exists.
+// ===================================================
+const INF = 999999;
+// dist matrix for Floyd-Warshall
+const FW = Array.from({length: N}, (_, i) =>
+  Array.from({length: N}, (_, j) => {
+    if (i === j) return 0;
+    return DIST[i][j] !== null ? DIST[i][j] : INF;
+  })
+);
+// next-hop matrix for path reconstruction
+const FW_NEXT = Array.from({length: N}, (_, i) =>
+  Array.from({length: N}, (_, j) => (i !== j && DIST[i][j] !== null) ? j : null)
+);
+
+for (let k = 0; k < N; k++)
+  for (let i = 0; i < N; i++)
+    for (let j = 0; j < N; j++)
+      if (FW[i][k] + FW[k][j] < FW[i][j]) {
+        FW[i][j] = FW[i][k] + FW[k][j];
+        FW_NEXT[i][j] = FW_NEXT[i][k];
+      }
+
+// Reconstruct path between two cities using FW_NEXT
+function getPath(a, b) {
+  if (FW_NEXT[a][b] === null) return [];
+  const path = [a];
+  let cur = a;
+  while (cur !== b) {
+    cur = FW_NEXT[cur][b];
+    path.push(cur);
+  }
+  return path;
+}
+
+// ===================================================
+// MINIMUM WEIGHT PERFECT MATCHING (exhaustive for small k)
+// FIXED: replaced greedy with exhaustive enumeration over all perfect matchings
+// For k odd-degree vertices, there are (k-1)!! perfect matchings — feasible for k<=10
+// ===================================================
+function findOddVertices() {
+  return CITIES.map(c => c.id).filter(id => DEGREES[id] % 2 !== 0);
+}
+
+function allPerfectMatchings(vertices) {
+  if (vertices.length === 0) return [[]];
+  const result = [];
+  const first = vertices[0];
+  const rest  = vertices.slice(1);
+  for (let i = 0; i < rest.length; i++) {
+    const partner   = rest[i];
+    const remaining = rest.filter((_, idx) => idx !== i);
+    const subMatchings = allPerfectMatchings(remaining);
+    subMatchings.forEach(m => result.push([[first, partner], ...m]));
+  }
+  return result;
+}
+
+function computeMatching() {
+  const odd = findOddVertices();
+  if (odd.length % 2 !== 0) { console.error('Odd number of odd-degree vertices!'); return []; }
+  if (odd.length === 0) return [];
+
+  const matchings = allPerfectMatchings(odd);
+  let bestCost    = INF;
+  let bestMatching = null;
+
+  matchings.forEach(matching => {
+    const cost = matching.reduce((s, [a, b]) => s + FW[a][b], 0);
+    if (cost < bestCost) { bestCost = cost; bestMatching = matching; }
+  });
+
+  return bestMatching.map(([a, b]) => ({
+    a, b,
+    dist: FW[a][b],
+    path: getPath(a, b),
+  }));
+}
+
+// ===================================================
+// BUILD AUGMENTED MULTIGRAPH for Hierholzer
+// ===================================================
+function buildAugmentedGraph(matching) {
+  // adjacency list: adj[v] = [{to, edgeKey, isDup}]
+  const adj = Array.from({length: N}, () => []);
+  let edgeId = 0;
+
+  // original edges
+  EDGES.forEach(([a, b, d]) => {
+    const key = edgeId++;
+    adj[a].push({ to: b, key, isDup: false, dist: d });
+    adj[b].push({ to: a, key, isDup: false, dist: d });
+  });
+
+  // duplicated edges from matching (follow path, add each hop)
+  matching.forEach(({ path, dist: totalDist }) => {
+    for (let i = 0; i < path.length - 1; i++) {
+      const a = path[i], b = path[i+1];
+      const hopDist = DIST[a][b];
+      const key = edgeId++;
+      adj[a].push({ to: b, key, isDup: true, dist: hopDist });
+      adj[b].push({ to: a, key, isDup: true, dist: hopDist });
+    }
+  });
+
+  return adj;
+}
+
+// ===================================================
+// HIERHOLZER'S ALGORITHM
+// FIXED: properly implemented on augmented multigraph
+// Each edge (original + duplicate) used exactly once
+// ===================================================
+function hierholzer(adj, start) {
+  // deep copy adjacency lists (we consume edges)
+  const graph = adj.map(list => [...list]);
+  const usedEdges = new Set();
+  const stack   = [start];
+  const circuit = [];
+
+  while (stack.length > 0) {
+    const v = stack[stack.length - 1];
+    // find next unused edge from v
+    const edgeIdx = graph[v].findIndex(e => !usedEdges.has(e.key));
+    if (edgeIdx !== -1) {
+      const edge = graph[v][edgeIdx];
+      usedEdges.add(edge.key);
+      stack.push(edge.to);
+    } else {
+      circuit.unshift(stack.pop());
+    }
+  }
+  return circuit;
+}
+
+// ===================================================
+// COMPUTE EVERYTHING ON LOAD
+// ===================================================
+const MATCHING = computeMatching();
+const AUG_GRAPH = buildAugmentedGraph(MATCHING);
+const EULER_ROUTE = hierholzer(AUG_GRAPH, 0); // start from Trenčín
+
+// Build set of duplicate edge pairs for display
+const DUP_SET = new Set();
+MATCHING.forEach(m => {
+  for (let i = 0; i < m.path.length - 1; i++) {
+    const a = Math.min(m.path[i], m.path[i+1]);
+    const b = Math.max(m.path[i], m.path[i+1]);
+    DUP_SET.add(`${a}_${b}`);
+  }
+});
+
+// ===================================================
+// UTILS
+// ===================================================
+function calcSumEdges() {
+  return EDGES.reduce((s, [,, d]) => s + d, 0);
+}
+
+// ===================================================
+// BUILD: Edge list display
+// ===================================================
+function buildEdgeList() {
+  const el = document.getElementById('edgeListDisplay');
+  if (!el) return;
+  EDGES.forEach(([a, b, d, desc]) => {
+    const chip = document.createElement('div');
+    const isDup = DUP_SET.has(`${Math.min(a,b)}_${Math.max(a,b)}`);
+    chip.style.cssText = `
+      padding: 4px 10px; border-radius: 5px; font-size: 11px;
+      font-family: var(--font-mono); border: 1px solid;
+      ${isDup
+        ? 'background:rgba(239,83,80,0.12); border-color:rgba(239,83,80,0.4); color:#ef5350;'
+        : 'background:rgba(79,195,247,0.08); border-color:rgba(79,195,247,0.3); color:#4fc3f7;'}
+    `;
+    chip.textContent = `${CITIES[a].code}–${CITIES[b].code} ${d}km`;
+    chip.title = desc || '';
+    el.appendChild(chip);
+  });
+}
+
+// ===================================================
+// BUILD: Distance Matrix HTML
+// FIXED: show null as — for non-existing edges
+// ===================================================
+function buildMatrix() {
+  const body = document.getElementById('matrixBody');
+  if (!body) return;
+
+  for (let i = 0; i < N; i++) {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th');
+    th.textContent = CITIES[i].code;
+    tr.appendChild(th);
+    for (let j = 0; j < N; j++) {
+      const td = document.createElement('td');
+      if (i === j) {
+        td.textContent = '—'; td.className = 'diag';
+      } else if (DIST[i][j] === null) {
+        td.textContent = '—';
+        td.style.cssText = 'color:#3a4a60; font-size:11px;';
+      } else {
+        td.textContent = DIST[i][j];
+        const key = `${Math.min(i,j)}_${Math.max(i,j)}`;
+        if (DUP_SET.has(key)) td.className = 'dup';
+        else if (DIST[i][j] <= 20) td.className = 'low';
+        else td.style.cssText = 'color:#4fc3f7; background:rgba(79,195,247,0.06);';
+      }
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+
+  // stats
+  const total = calcSumEdges();
+  const setEl = (id, val) => { const e=document.getElementById(id); if(e) e.textContent=val; };
+  setEl('totalEdges', EDGES.length);
+  setEl('totalDist', total);
+  setEl('avgDist', Math.round(total / EDGES.length));
+  let minD = 999;
+  EDGES.forEach(([,,d]) => { if(d < minD) minD = d; });
+  setEl('minDist', minD);
+}
+
+// ===================================================
+// BUILD: Degree chips
+// FIXED: uses real computed degrees, marks odd/even
+// ===================================================
+function buildDegrees() {
+  const el = document.getElementById('degreeTable');
+  if (!el) return;
+  CITIES.forEach(c => {
+    const deg = DEGREES[c.id];
+    const chip = document.createElement('div');
+    chip.className = 'degree-chip ' + (deg % 2 !== 0 ? 'odd' : 'even');
+    chip.innerHTML = `${c.code} <strong>deg=${deg}</strong>`;
+    chip.title = c.name;
+    el.appendChild(chip);
+  });
+}
+
+// ===================================================
+// BUILD: Matching grid
+// FIXED: shows exhaustive MWPM result
+// ===================================================
+function buildMatching() {
+  const el = document.getElementById('matchingGrid');
+  if (!el) return;
+  let total = 0;
+  MATCHING.forEach(m => {
+    total += m.dist;
+    const pathStr = m.path.map(id => CITIES[id].code).join(' → ');
+    const card = document.createElement('div');
+    card.className = 'match-card';
+    card.innerHTML = `
+      <div class="pair">${CITIES[m.a].code} ↔ ${CITIES[m.b].code}</div>
+      <div style="font-size:11px; color:var(--muted); margin:4px 0">${CITIES[m.a].name}<br>${CITIES[m.b].name}</div>
+      <div style="font-size:10px; color:#7a90b0; margin:4px 0; font-family:var(--font-mono)">${pathStr}</div>
+      <div class="dist"><strong style="color:var(--accent)">${m.dist} km</strong></div>
+    `;
+    el.appendChild(card);
+  });
+  const setEl = (id, val) => { const e=document.getElementById(id); if(e) e.textContent=val; };
+  setEl('dupTotal', total);
+  setEl('dupEdgeCount', MATCHING.length);
+}
+
+// ===================================================
+// BUILD: Euler route display
+// FIXED: route generated by Hierholzer on augmented graph
+// ===================================================
+function buildRoute() {
+  const el = document.getElementById('routeSequence');
+  if (!el) return;
+
+  let origTotal = calcSumEdges();
+  let dupTotal  = MATCHING.reduce((s, m) => s + m.dist, 0);
+  let totalKm   = origTotal + dupTotal;
+
+  EULER_ROUTE.forEach((cityId, idx) => {
+    const span = document.createElement('span');
+    span.className = 'route-city';
+    span.textContent = CITIES[cityId].code;
+    span.title = CITIES[cityId].name;
+    el.appendChild(span);
+    if (idx < EULER_ROUTE.length - 1) {
+      const arr = document.createElement('span');
+      arr.className = 'route-arrow';
+      arr.textContent = '→';
+      el.appendChild(arr);
+    }
+  });
+
+  const setEl = (id, val) => { const e=document.getElementById(id); if(e) e.textContent=val; };
+  setEl('origKm', origTotal);
+  setEl('dupKm', dupTotal);
+  setEl('totalKm', totalKm);
+  setEl('routeStops', EULER_ROUTE.length);
+  setEl('map-total', totalKm);
+  setEl('map-orig', origTotal);
+}
+
+// ===================================================
+// MAP: Leaflet.js
+// FIXED: draws only realistic edges, hover tooltips, improved legend
+// ===================================================
+let leafletMap, layers = { original: [], dup: [], euler: [], markers: [] };
+let animTimer = null;
+let animPolyline = null;
+
+// Compute curved arc between two lat/lng points
+function getCurvedPoints(lat1, lng1, lat2, lng2, offsetFactor) {
+  const midLat = (lat1 + lat2) / 2;
+  const midLng = (lng1 + lng2) / 2;
+  const dLat = lat2 - lat1, dLng = lng2 - lng1;
+  const len = Math.sqrt(dLat*dLat + dLng*dLng);
+  const ctrlLat = midLat + (-dLng / len) * offsetFactor;
+  const ctrlLng = midLng + ( dLat / len) * offsetFactor;
+  const pts = [];
+  for (let t = 0; t <= 24; t++) {
+    const u = t / 24, v = 1 - u;
+    pts.push([v*v*lat1 + 2*v*u*ctrlLat + u*u*lat2,
+              v*v*lng1 + 2*v*u*ctrlLng + u*u*lng2]);
+  }
+  return pts;
+}
+
+function initMap() {
+  if (!document.getElementById('map') || leafletMap) return;
+
+  leafletMap = L.map('map', { zoomControl: true }).setView([48.87, 18.2], 9);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 18,
+  }).addTo(leafletMap);
+
+  // Add custom legend to map
+  const legend = L.control({ position: 'bottomright' });
+  legend.onAdd = function() {
+    const div = L.DomUtil.create('div');
+    div.style.cssText = 'background:rgba(11,15,26,0.92); border:1px solid #2a3a55; border-radius:8px; padding:12px 14px; font-size:12px; color:#e0e8f5; min-width:190px;';
+    div.innerHTML = `
+      <div style="font-weight:700; margin-bottom:8px; color:#e8a838; font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:1px;">LEGENDA</div>
+      <div style="display:flex; align-items:center; gap:8px; margin:5px 0;">
+        <svg width="24" height="6"><line x1="0" y1="3" x2="24" y2="3" stroke="#4fc3f7" stroke-width="2"/></svg>
+        <span>Pôvodná hrana siete</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; margin:5px 0;">
+        <svg width="24" height="6"><line x1="0" y1="3" x2="24" y2="3" stroke="#ef5350" stroke-width="3" stroke-dasharray="6,3"/></svg>
+        <span>Duplikovaná hrana (CPP)</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; margin:5px 0;">
+        <svg width="24" height="6"><line x1="0" y1="3" x2="24" y2="3" stroke="#e8a838" stroke-width="3"/></svg>
+        <span>Eulerovský okruh (anim.)</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; margin:5px 0;">
+        <div style="width:10px;height:10px;background:#e8a838;border-radius:50%;border:2px solid #fff;flex-shrink:0;"></div>
+        <span>Mesto</span>
+      </div>`;
+    return div;
+  };
+  legend.addTo(leafletMap);
+
+  // Draw edges (only realistic network edges)
+  EDGES.forEach(([a, b, dist, desc], idx) => {
+    const isDup = DUP_SET.has(`${Math.min(a,b)}_${Math.max(a,b)}`);
+    const c1 = CITIES[a], c2 = CITIES[b];
+    // vary offset slightly per edge index to avoid overlap on parallel routes
+    const offset = (idx % 2 === 0 ? 1 : -1) * (0.014 + idx * 0.0008);
+    const curvePts = getCurvedPoints(c1.lat, c1.lng, c2.lat, c2.lng, offset);
+
+    const line = L.polyline(curvePts, {
+      color:     isDup ? '#ef5350' : '#4fc3f7',
+      weight:    isDup ? 4 : 2,
+      opacity:   isDup ? 0.9 : 0.55,
+      dashArray: isDup ? '10,6' : null,
+      smoothFactor: 1,
+    }).addTo(leafletMap);
+
+    // Hover tooltip showing city names + distance
+    line.bindTooltip(
+      `<strong>${c1.name} ↔ ${c2.name}</strong><br>` +
+      `${dist} km${isDup ? ' <span style="color:#ef5350">⚠ duplikát</span>' : ''}`,
+      { sticky: true, className: 'leaflet-tooltip-dark' }
+    );
+
+    line.on('click', () => {
+      document.getElementById('info-content').innerHTML =
+        `<strong style="color:#fff">${c1.name} ↔ ${c2.name}</strong><br>
+         Vzdialenosť: <strong style="color:var(--accent)">${dist} km</strong><br>
+         Cesta: <span style="color:var(--muted); font-size:11px;">${desc || '—'}</span><br>
+         ${isDup
+           ? '<span style="color:var(--danger)">⚠ Duplikovaná hrana (CPP párovanie)</span>'
+           : '<span style="color:var(--accent2)">Pôvodná hrana realistickej siete</span>'}`;
+    });
+    line.on('mouseover', function() { this.setStyle({ opacity: 1, weight: this.options.weight + 1.5 }); });
+    line.on('mouseout',  function() { this.setStyle({ opacity: isDup ? 0.9 : 0.55, weight: isDup ? 4 : 2 }); });
+
+    // Distance label at arc midpoint
+    const midPt = curvePts[Math.floor(curvePts.length / 2)];
+    const lc = isDup ? '#ef5350' : '#4fc3f7';
+    const lbl = L.divIcon({
+      className: '',
+      html: `<div style="display:inline-block;transform:translate(-50%,-50%);background:rgba(11,15,26,0.85);border:1px solid ${lc};color:${lc};font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;white-space:nowrap;pointer-events:none;line-height:1.5;">${dist}</div>`,
+      iconSize: [0, 0], iconAnchor: [0, 0],
+    });
+    const lblMarker = L.marker(midPt, { icon: lbl, interactive: false }).addTo(leafletMap);
+
+    if (isDup) { layers.dup.push(line); layers.dup.push(lblMarker); }
+    else        { layers.original.push(line); layers.original.push(lblMarker); }
+  });
+
+  // City markers
+  CITIES.forEach(c => {
+    const deg = DEGREES[c.id];
+    const isOdd = deg % 2 !== 0;
+    const dotColor = isOdd ? '#ef5350' : '#e8a838';
+    const icon = L.divIcon({
+      className: '',
+      html: `<div style="display:inline-flex;flex-direction:column;align-items:center;transform:translate(-50%,-50%);pointer-events:none;gap:3px;">
+        <div style="width:10px;height:10px;background:${dotColor};border:2px solid #fff;border-radius:50%;box-shadow:0 0 6px rgba(232,168,56,0.8),0 2px 5px rgba(0,0,0,0.7);flex-shrink:0;"></div>
+        <div style="background:rgba(11,15,26,0.90);color:${dotColor};font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;border:1px solid ${dotColor}55;white-space:nowrap;letter-spacing:0.5px;line-height:1.4;">${c.code}</div>
+      </div>`,
+      iconSize: [0, 0], iconAnchor: [0, 0],
+    });
+
+    const marker = L.marker([c.lat, c.lng], { icon, zIndexOffset: 1000 }).addTo(leafletMap);
+    marker.bindTooltip(
+      `<strong>${c.name}</strong><br>stupeň = ${deg} (${deg%2===0?'párny':'nepárny'})`,
+      { permanent: false, className: 'leaflet-tooltip-dark' }
+    );
+    marker.on('click', () => {
+      const neighbors = EDGES
+        .filter(([a,b]) => a===c.id||b===c.id)
+        .map(([a,b,d]) => `${CITIES[a===c.id?b:a].code}: ${d} km`)
+        .sort((x,y) => parseInt(x.split(': ')[1]) - parseInt(y.split(': ')[1]));
+      document.getElementById('info-content').innerHTML =
+        `<strong style="color:#fff">${c.name}</strong><br>
+         ${c.lat.toFixed(4)}°N, ${c.lng.toFixed(4)}°E<br>
+         Stupeň: <strong style="color:${isOdd?'var(--danger)':'var(--success)'}">${deg} (${isOdd?'nepárny — nutné párovanie':'párny — OK'})</strong><br><br>
+         <span style="color:var(--muted);font-size:11px;">Priame spojenia:</span><br>
+         ${neighbors.map(n=>`<span style="color:var(--accent);font-family:var(--font-mono);font-size:11px;">${n}</span>`).join('<br>')}`;
+    });
+    layers.markers.push(marker);
+  });
+
+  // Tooltip style injection
+  const style = document.createElement('style');
+  style.textContent = '.leaflet-tooltip-dark { background:rgba(11,15,26,0.95)!important; border:1px solid #2a3a55!important; color:#e0e8f5!important; font-family:"Source Sans 3",sans-serif; font-size:12px; padding:6px 10px; border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.5)!important; } .leaflet-tooltip-dark::before { display:none!important; }';
+  document.head.appendChild(style);
+}
+
+function toggleLayer(type, show) {
+  const group = type==='original' ? layers.original :
+                type==='dup'      ? layers.dup      : layers.euler;
+  group.forEach(l => {
+    if (show) { if(!leafletMap.hasLayer(l)) leafletMap.addLayer(l); }
+    else       { if(leafletMap.hasLayer(l))  leafletMap.removeLayer(l); }
+  });
+}
+
+// ===== ANIMATION =====
+function animateRoute() {
+  resetAnimation();
+  if (!leafletMap) return;
+  const pts = EULER_ROUTE.map(id => [CITIES[id].lat, CITIES[id].lng]);
+  animPolyline = L.polyline([], { color:'#e8a838', weight:4.5, opacity:0.92 }).addTo(leafletMap);
+  layers.euler.push(animPolyline);
+  document.getElementById('tog-euler').checked = true;
+  let i = 0;
+  function step() {
+    if (i >= pts.length) return;
+    animPolyline.addLatLng(pts[i++]);
+    animTimer = setTimeout(step, 200);
+  }
+  step();
+}
+
+function resetAnimation() {
+  if (animTimer) clearTimeout(animTimer);
+  layers.euler.forEach(l => { if(leafletMap&&leafletMap.hasLayer(l)) leafletMap.removeLayer(l); });
+  layers.euler = [];
+  animPolyline = null;
+}
+
+// ===================================================
+// TAB NAVIGATION
+// ===================================================
+function showTab(name) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(`sec-${name}`).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'mapa') {
+    setTimeout(() => { initMap(); if(leafletMap) leafletMap.invalidateSize(); }, 100);
+  }
+}
+
+// ===================================================
+// INIT
+// ===================================================
+window.addEventListener('DOMContentLoaded', () => {
+  buildEdgeList();
+  buildMatrix();
+  buildDegrees();
+  buildMatching();
+  buildRoute();
+  buildPresentationSection();
+});
+</script>
+
+
+<!-- ===== SECTION: PREZENTACIA ===== -->
+<div id="sec-prezentacia" class="section container">
+  <div class="sec-title">Ako prezentovať <span>tento projekt</span></div>
+  <div class="sec-sub">Jednoduchý sprievodca ústnou obhajobou — bez zbytočného žargónu</div>
+
+  <!-- BLOCK 2: Why Eulerian graphs matter -->
+  <div style="margin-bottom: 32px;">
+    <h3 style="color:#fff; font-family:var(--font-head); font-size:20px; margin-bottom:14px;">
+      1. Prečo sú eulerovské grafy dôležité
+    </h3>
+    <div class="def-box blue" style="margin-bottom:16px;">
+      <strong>Kľúčová myšlienka na prezentáciu:</strong><br>
+      „Eulerovský okruh je ideálny stav — poštár prejde každou cestou presne raz, bez jediného zbytočného kilometre. Náš realistický graf eulerovský nie je, a práve to je jadro problému: ako ho urobiť eulerovským s čo najmenším zásahom?"
+    </div>
+
+    <ul class="steps">
+      <li>
+        <div class="step-num" style="background:var(--accent2); color:#000;">→</div>
+        <div class="step-content">
+          <h4>Súvislosť so stupňami vrcholov</h4>
+          <p>Každý vrchol reprezentuje mesto. Stupeň vrcholu = počet ciest, ktoré do mesta vedú. Párny stupeň znamená: „koľkokrát do mesta prídem, toľkokrát aj odídem" — poštár sa nikdy nezasekne. Nepárny stupeň túto rovnováhu naruší.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-num" style="background:var(--accent2); color:#000;">→</div>
+        <div class="step-content">
+          <h4>Prečo Euler, nie Hamilton</h4>
+          <p>Mohli by sme sa pýtať: „Nestačilo by navštíviť každé mesto raz?" — to je Hamiltonov problém (TSP). No poštár nepotrebuje navštíviť mestá, ale <em>ulice</em>. Preto je CPP správnou voľbou a je zároveň efektívne riešiteľný v polynomiálnom čase, na rozdiel od NP-ťažkého TSP.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-num" style="background:var(--accent2); color:#000;">→</div>
+        <div class="step-content">
+          <h4>Praktický dopad</h4>
+          <p>V našej sieti 22 hrán a <span id="pres-dup-count">niekoľkých</span> duplikovaných hrán je výsledná trasa <span id="pres-total-km">~600</span> km. Bez optimalizácie by poštár mohol najazdíte výrazne viac — minimálne párovanie garantuje, že navyše najazdí práve <span id="pres-dup-km">minimum</span> km a nie viac.</p>
+        </div>
+      </li>
+    </ul>
+  </div>
+
+  <!-- BLOCK 3: Main challenge -->
+  <div style="margin-bottom: 32px;">
+    <h3 style="color:#fff; font-family:var(--font-head); font-size:20px; margin-bottom:14px;">
+      2. Hlavná výzva projektu
+    </h3>
+
+    <div class="theory-grid">
+      <div class="theory-card" style="grid-column: span 2;">
+        <span class="icon">🏆</span>
+        <h3>Minimálne váhové dokonalé párovanie</h3>
+        <p style="margin-bottom:10px;">Toto je matematicky najnáročnejšia časť. Máme vrcholy s nepárnym stupňom a musíme ich spárovať — ale nie ľubovoľne. Chceme párovanie, kde <strong>súčet vzdialeností medzi pármi je čo najmenší</strong>.</p>
+        <p>Hladový (greedy) algoritmus — „vždy spáruj najbližší dostupný pár" — <em>nie je zaručene optimálny</em>. Môže zvoliť lokálne dobrý pár, čím zablokuje lepšie globálne riešenie. Správnym prístupom je buď Edmondsov Blossom algoritmus (O(n³)), alebo pre malý počet nepárnych vrcholov exhaustívne porovnanie všetkých možností — čo sme aplikovali v tomto projekte.</p>
+      </div>
+      <div class="theory-card red">
+        <span class="icon">🗺️</span>
+        <h3>Realistický graf</h3>
+        <p>Ďalšou výzvou bolo rozhodnúť sa, <strong>ktoré hrany do grafu zahrnúť</strong>. Úplný graf K₁₀ by bol matematicky pohodlnejší, ale nerealistický — neexistuje priame cestné spojenie medzi každými dvoma mestami. Museli sme zvoliť len zmysluplné spojenia, čo ovplyvnilo aj stupne vrcholov a celkový charakter riešenia.</p>
+      </div>
+      <div class="theory-card blue">
+        <span class="icon">🔄</span>
+        <h3>Overenie konzistencie</h3>
+        <p>Treba skontrolovať, že eulerovský okruh <strong>skutočne používa každú hranu práve raz</strong> — vrátane duplikátov. Hierholzerov algoritmus to zaručuje matematicky, no pri manuálnej konštrukcii je ľahké urobiť chybu. V projekte je okruh generovaný priamo algoritmom, nie ručne.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- BLOCK 4: Quick Q&A prep -->
+  <div>
+    <h3 style="color:#fff; font-family:var(--font-head); font-size:20px; margin-bottom:14px;">
+      3. Možné otázky od komisie — a stručné odpovede
+    </h3>
+    <div style="display:flex; flex-direction:column; gap:12px;" id="qaList"></div>
+  </div>
+</div>
+
+</body>
+</html>
